@@ -1870,8 +1870,7 @@ async def rob_safe_start(call: CallbackQuery) -> None:
 
 def _build_code_keyboard(rid, vid, code, hidden_pos, show_lockpick=False, lockpick_count=0):
     rows = []
-    revealed = {i for i in range(len(code)) if i != hidden_pos}
-    masked = _mask_code(code, revealed)
+    masked = _mask_code(code, {i for i in range(len(code)) if i != hidden_pos})
     rows.append([InlineKeyboardButton(text=f"[ {masked} ]", callback_data="noop")])
 
     if show_lockpick:
@@ -2096,8 +2095,7 @@ async def safe_use_lockpick(call: CallbackQuery) -> None:
 
                 code = sess["code"]
                 hidden_pos = sess.get("hidden_pos", 0)
-                revealed = {i for i in range(len(code)) if i != hidden_pos}
-                masked = _mask_code(code, revealed)
+                masked = _mask_code(code, {i for i in range(len(code)) if i != hidden_pos})
 
                 vr = await session.execute(select(User).where(User.tg_id == vid).with_for_update())
                 victim = vr.scalar_one_or_none()
