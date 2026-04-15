@@ -49,6 +49,7 @@ async def _save_chat_mapping(user_id: int, chat_id: int) -> None:
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
 dp.message.middleware(ChatTrackingMiddleware())
+dp.message.middleware(ThrottlingMiddleware())
 dp.callback_query.middleware(ThrottlingMiddleware())
 
 dp.include_router(inline_router.router)

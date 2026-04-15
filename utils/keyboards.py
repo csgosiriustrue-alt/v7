@@ -1,4 +1,5 @@
 """Клавиатуры Telegram."""
+import time
 from aiogram.types import (
     ReplyKeyboardMarkup, KeyboardButton,
     InlineKeyboardMarkup, InlineKeyboardButton,
@@ -59,8 +60,13 @@ def get_blackmarket_confirm_keyboard(item_id: int) -> InlineKeyboardMarkup:
     ])
 
 
-def get_box_keyboard(owner_id: int | None = None) -> InlineKeyboardMarkup:
-    cb = f"open_box_{owner_id}" if owner_id else "open_box"
+def get_box_keyboard(owner_id: int | None = None, nonce: str | None = None) -> InlineKeyboardMarkup:
+    if owner_id:
+        if nonce is None:
+            nonce = str(int(time.time() * 1000))
+        cb = f"open_box_{owner_id}_{nonce}"
+    else:
+        cb = "open_box"
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="✊ Теребить!", callback_data=cb)]
     ])
