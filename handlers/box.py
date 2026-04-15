@@ -2,11 +2,13 @@
 import logging
 import asyncio
 import random
+import time
+import uuid
 from datetime import datetime
 from aiogram import Router
 from aiogram.types import Message, CallbackQuery
 from aiogram.filters import Command
-from sqlalchemy import select, and_
+from sqlalchemy import select, and_, update
 
 from database import get_db
 from models import User, Item, Inventory, MAX_BOX_COUNT
@@ -19,7 +21,10 @@ router = Router()
 
 _inline_history: dict[str, list[dict]] = {}
 processing_users: dict[int, bool] = {}
+last_fap_time: dict[int, float] = {}
+valid_box_nonces: dict[int, str] = {}
 POLLUTION_CHANCE = 0.0777
+FAP_THROTTLE_INTERVAL = 1.0
 
 
 def _item_info(item, rarity_emoji, rarity_name):
@@ -71,23 +76,28 @@ def _build_dm_text(items, boosts_text, box_count, pollution=False):
 
 def _parse_box_callback(data):
     if data == "open_box":
-        return None
+        return None, None
+    if not data.startswith("open_box_"):
+        return None, None
+    payload = data.removeprefix("open_box_")
+    owner_part, _, nonce = payload.partition("_")
     try:
-        return int(data.split("open_box_")[1])
-    except (ValueError, IndexError):
-        return None
+        return int(owner_part), nonce or None
+    except ValueError:
+        return None, None
 
 
 def _get_result_keyboard(user_id: int, box_count: int):
-    from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
-    buttons = []
     if box_count > 0:
-        buttons.append([InlineKeyboardButton(text="✊ Теребить!",
-            callback_data=f"open_box_{user_id}")])
-    else:
-        buttons.append([InlineKeyboardButton(text="💰 Продать весь улов",
-            callback_data=f"sell_genes_{user_id}")])
-    return InlineKeyboardMarkup(inline_keyboard=buttons)
+        nonce = uuid.uuid4().hex
+        valid_box_nonces[user_id] = nonce
+        return get_box_keyboard(owner_id=user_id, nonce=nonce)
+
+    valid_box_nonces.pop(user_id, None)
+    from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
+    return InlineKeyboardMarkup(inline_keyboard=[[
+        InlineKeyboardButton(text="💰 Продать весь улов", callback_data=f"sell_genes_{user_id}")
+    ]])
 
 
 async def _roll_items(session, user):
@@ -115,6 +125,19 @@ async def _add_items_to_inv(session, user_id, items):
             inv.quantity += 1
         else:
             session.add(Inventory(user_id=user_id, item_id=item.id, quantity=1))
+
+
+async def _consume_box_charge(session, user_id: int) -> int | None:
+    result = await session.execute(
+        update(User)
+        .where(User.tg_id == user_id, User.box_count > 0)
+        .values(box_count=User.box_count - 1)
+        .returning(User.box_count)
+    )
+    row = result.fetchone()
+    if row is None:
+        return None
+    return row[0]
 
 
 # ============================================================================
@@ -202,10 +225,21 @@ async def open_box_handler(call: CallbackQuery) -> None:
     user_id = call.from_user.id
     user_first_name = call.from_user.first_name or "Друг"
 
-    owner_id = _parse_box_callback(call.data)
+    current_time = time.time()
+    if current_time - last_fap_time.get(user_id, 0) < FAP_THROTTLE_INTERVAL:
+        await call.answer("⏳ Медленнее!")
+        return
+    last_fap_time[user_id] = current_time
+
+    owner_id, nonce = _parse_box_callback(call.data)
     if owner_id is not None and owner_id != user_id:
         await call.answer("❌ Это не твоё!", show_alert=True)
         return
+    if owner_id is not None:
+        latest_nonce = valid_box_nonces.get(user_id)
+        if latest_nonce is not None and nonce != latest_nonce:
+            await call.answer()
+            return
 
     if user_id in processing_users:
         await call.answer("⏳ Обработка...")
@@ -252,7 +286,10 @@ async def open_box_handler(call: CallbackQuery) -> None:
                     return
 
                 # Атомарное списание заряда ДО анимации
-                user.box_count -= 1
+                if await _consume_box_charge(session, user_id) is None:
+                    await call.answer("❌ Нечего теребить!", show_alert=True)
+                    return
+                await session.refresh(user)
                 user.increment_action()
                 await session.commit()
 
@@ -365,6 +402,11 @@ async def cmd_box(message: Message) -> None:
     if message.chat.type != "private":
         return
     user_id = message.from_user.id
+    current_time = time.time()
+    if current_time - last_fap_time.get(user_id, 0) < FAP_THROTTLE_INTERVAL:
+        await message.answer("⏳ Медленнее!", reply_markup=get_main_keyboard())
+        return
+    last_fap_time[user_id] = current_time
     db = get_db()
     async for session in db.get_session():
         try:
@@ -381,7 +423,10 @@ async def cmd_box(message: Message) -> None:
                     f"Через <b>{h}ч. {m}мин.</b>\n\n⚡ Или купите заряды в магазине, перейдя в чат с ботом.",
                     parse_mode="HTML", reply_markup=get_main_keyboard())
                 return
-            user.box_count -= 1
+            if await _consume_box_charge(session, user_id) is None:
+                await message.answer("❌ Нечего теребить!", reply_markup=get_main_keyboard())
+                return
+            await session.refresh(user)
             user.increment_action()
 
             items, pollution = await _roll_items(session, user)
