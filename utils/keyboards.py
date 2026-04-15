@@ -1,5 +1,5 @@
 """Клавиатуры Telegram."""
-import time
+import uuid
 from aiogram.types import (
     ReplyKeyboardMarkup, KeyboardButton,
     InlineKeyboardMarkup, InlineKeyboardButton,
@@ -63,7 +63,7 @@ def get_blackmarket_confirm_keyboard(item_id: int) -> InlineKeyboardMarkup:
 def get_box_keyboard(owner_id: int | None = None, nonce: str | None = None) -> InlineKeyboardMarkup:
     if owner_id:
         if nonce is None:
-            nonce = str(int(time.time() * 1000))
+            nonce = uuid.uuid4().hex
         cb = f"open_box_{owner_id}_{nonce}"
     else:
         cb = "open_box"

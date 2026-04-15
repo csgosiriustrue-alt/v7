@@ -11,7 +11,8 @@ THROTTLE_INTERVAL = 1.0  # секунды между разрешёнными д
 class ThrottlingMiddleware(BaseMiddleware):
     """Игнорирует слишком частые CallbackQuery и Message от одного пользователя."""
 
-    def __init__(self, interval: float = THROTTLE_INTERVAL, message_interval: float = 1.0) -> None:
+    def __init__(self, interval: float = THROTTLE_INTERVAL,
+        message_interval: float = THROTTLE_INTERVAL) -> None:
         self._interval = interval
         self._last_press: dict[int, float] = {}
         self._message_interval = message_interval
