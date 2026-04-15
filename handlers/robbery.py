@@ -1858,9 +1858,9 @@ async def rob_safe_start(call: CallbackQuery) -> None:
                 text=(f"🔓 <b>Взлом {v_name}</b>\n\n"
                       f"Код: <code>{masked}</code>\n"
                       f"Попыток: <b>{SAFE_MAX_ATTEMPTS}</b>\n\n{tt}"
-                      f"Набери код 👇"),
+                      f"Угадай цифру 👇"),
                 parse_mode="HTML",
-                reply_markup=_build_code_keyboard(rid, vid, revealed, code, ""))
+                reply_markup=_build_code_keyboard(rid, vid, code, hidden_pos))
         except Exception as e:
             logger.error(f"❌ safe_start: {e}", exc_info=True)
             _cleanup_session(iid, rid, vid)
@@ -1868,10 +1868,11 @@ async def rob_safe_start(call: CallbackQuery) -> None:
             await session.close()
 
 
-def _build_code_keyboard(rid, vid, revealed, code, ci, show_lockpick=False, lockpick_count=0):
+def _build_code_keyboard(rid, vid, code, hidden_pos, show_lockpick=False, lockpick_count=0):
     rows = []
-    d = ci + "_" * (4 - len(ci))
-    rows.append([InlineKeyboardButton(text=f"[ {' '.join(d)} ]", callback_data="noop")])
+    revealed = {i for i in range(len(code)) if i != hidden_pos}
+    masked = _mask_code(code, revealed)
+    rows.append([InlineKeyboardButton(text=f"[ {masked} ]", callback_data="noop")])
 
     if show_lockpick:
         rows.append([InlineKeyboardButton(
@@ -1880,63 +1881,31 @@ def _build_code_keyboard(rid, vid, revealed, code, ci, show_lockpick=False, lock
         rows.append([InlineKeyboardButton(text="❌ Сдаться", callback_data=f"safe_giveup_{rid}_{vid}")])
         return InlineKeyboardMarkup(inline_keyboard=rows)
 
-    for rs in range(1, 10, 3):
-        row = [InlineKeyboardButton(text=str(x), callback_data=f"safe_digit_{rid}_{vid}_{ci}{x}")
-            for x in range(rs, min(rs + 3, 10))]
-        rows.append(row)
-    rows.append([
-        InlineKeyboardButton(text="⬅️", callback_data=f"safe_digit_{rid}_{vid}_{ci[:-1] if ci else ''}"),
-        InlineKeyboardButton(text="0", callback_data=f"safe_digit_{rid}_{vid}_{ci}0"),
-        InlineKeyboardButton(text="✅", callback_data=f"safe_submit_{rid}_{vid}_{ci}")])
+    rows.append([InlineKeyboardButton(text=str(x), callback_data=f"safe_guess_{rid}_{vid}_{x}") for x in range(5)])
+    rows.append([InlineKeyboardButton(text=str(x), callback_data=f"safe_guess_{rid}_{vid}_{x}") for x in range(5, 10)])
     rows.append([InlineKeyboardButton(text="❌", callback_data=f"rob_cancel_{rid}_{vid}")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
-@router.callback_query(lambda c: c.data and c.data.startswith("safe_digit_"))
-async def safe_digit(call: CallbackQuery) -> None:
-    await _safe_answer(call)  # ← Мгновенный ответ (критично для скорости набора кода!)
-    _set_bot_ref(call.bot)
-    parts = call.data.split("_")
-    rid, vid = int(parts[2]), int(parts[3])
-    ci = parts[4] if len(parts) > 4 else ""
-    if not _check_robber(call, rid):
-        return
-    if len(ci) > 4:
-        ci = ci[:4]
-    iid = call.inline_message_id
-    sess = _robbery_sessions.get(iid)
-    if not sess:
-        return
-    if sess.get("attempts_left", 0) <= 0:
-        return
-
-    _reset_timer(iid, rid, vid)
-
-    # ── Обновляем клавиатуру без запроса к БД (быстро!) ──
-    await _safe_edit_reply_markup(
-        call.bot, inline_message_id=iid,
-        reply_markup=_build_code_keyboard(rid, vid, set(sess.get("revealed", [])), sess["code"], ci))
-
-
-@router.callback_query(lambda c: c.data and c.data.startswith("safe_submit_"))
-async def safe_submit(call: CallbackQuery) -> None:
+@router.callback_query(lambda c: c.data and c.data.startswith("safe_guess_"))
+async def safe_guess(call: CallbackQuery) -> None:
     await _safe_answer(call)  # ← Мгновенный ответ
     _set_bot_ref(call.bot)
     parts = call.data.split("_")
     rid, vid = int(parts[2]), int(parts[3])
-    guess = parts[4] if len(parts) > 4 else ""
+    digit = parts[4] if len(parts) > 4 else ""
     if not _check_robber(call, rid):
+        return
+    if not digit.isdigit():
         return
     iid = call.inline_message_id
     sess = _robbery_sessions.get(iid)
     if not sess:
         return
-    if len(guess) != 4 or not guess.isdigit():
-        return
     if sess.get("attempts_left", 0) <= 0:
         return
 
-    # ── Антиспам Lock (предотвращает двойной submit) ──
+    # ── Антиспам Lock (предотвращает двойное нажатие) ──
     lock = _get_lock(f"submit_{iid}")
     if lock.locked():
         return
@@ -1944,6 +1913,7 @@ async def safe_submit(call: CallbackQuery) -> None:
         _reset_timer(iid, rid, vid)
 
         code = sess["code"]
+        hidden_pos = sess["hidden_pos"]
         sess["attempts_left"] -= 1
         al = sess["attempts_left"]
         v_name = sess.get("victim_username", str(vid))
@@ -1959,7 +1929,7 @@ async def safe_submit(call: CallbackQuery) -> None:
                     _cleanup_session(iid, rid, vid)
                     return
 
-                if guess == code:
+                if digit == code[hidden_pos]:
                     rn = call.from_user.first_name or "Грабитель"
                     used_bouncer = sess.get("used_bouncer", False)
                     safe_coins_before = victim.hidden_coins or 0
@@ -1991,10 +1961,10 @@ async def safe_submit(call: CallbackQuery) -> None:
                 victim.safe_code = new_code
                 sess["code"] = new_code
 
-                hidden_pos = random.randint(0, 3)
-                revealed = {i for i in range(4) if i != hidden_pos}
-                sess["revealed"] = list(revealed)
-                sess["hidden_pos"] = hidden_pos
+                new_hidden_pos = random.randint(0, 3)
+                new_revealed = {i for i in range(4) if i != new_hidden_pos}
+                sess["revealed"] = list(new_revealed)
+                sess["hidden_pos"] = new_hidden_pos
 
                 await session.commit()
 
@@ -2009,11 +1979,11 @@ async def safe_submit(call: CallbackQuery) -> None:
 
                     if lockpick_count > 0:
                         health_line = f"❤️ Прочность: {victim.safe_health}/3\n" if victim.safe_type == "rusty" else ""
-                        masked = _mask_code(new_code, revealed)
+                        masked = _mask_code(new_code, new_revealed)
                         await _safe_edit_text(
                             call.bot, inline_message_id=iid,
                             text=(f"🔓 <b>{v_name}</b>\n\n"
-                                  f"❌ <code>{guess}</code> — неверно!\n"
+                                  f"❌ <code>{digit}</code> — неверно!\n"
                                   f"🔄 Код перекодирован!\n"
                                   f"{health_line}\n"
                                   f"Новый код: <code>{masked}</code>\n"
@@ -2022,7 +1992,7 @@ async def safe_submit(call: CallbackQuery) -> None:
                                   f"Использовать отмычку для +1 попытки?"),
                             parse_mode="HTML",
                             reply_markup=_build_code_keyboard(
-                                rid, vid, revealed, new_code, "",
+                                rid, vid, new_code, new_hidden_pos,
                                 show_lockpick=True, lockpick_count=lockpick_count))
                         return
                     else:
@@ -2043,7 +2013,7 @@ async def safe_submit(call: CallbackQuery) -> None:
                         await _safe_edit_text(
                             call.bot, inline_message_id=iid,
                             text=(f"🔒 <b>Взлом провален!</b> ❌\n\n"
-                                  f"❌ <code>{guess}</code> — неверно!\n"
+                                  f"❌ <code>{digit}</code> — неверно!\n"
                                   f"{health_line}"
                                   f"🗝 Отмычек нет.\n\n"
                                   f"🔒 Тюрьма: {JAIL_SAFE_FAIL_MINUTES}мин{lawyer_hint}"),
@@ -2052,26 +2022,26 @@ async def safe_submit(call: CallbackQuery) -> None:
                         return
 
                 health_line = f"❤️ Прочность: {victim.safe_health}/3\n" if victim.safe_type == "rusty" else ""
-                masked = _mask_code(new_code, revealed)
+                masked = _mask_code(new_code, new_revealed)
                 lockpick_count = sess.get("lockpicks_available", 0)
                 lp_text = f"🗝 Отмычек: <b>{lockpick_count}</b>\n" if lockpick_count > 0 else ""
 
                 await _safe_edit_text(
                     call.bot, inline_message_id=iid,
                     text=(f"🔓 <b>{v_name}</b>\n\n"
-                          f"❌ <code>{guess}</code> — неверно!\n"
+                          f"❌ <code>{digit}</code> — неверно!\n"
                           f"🔄 Код перекодирован!\n"
                           f"{health_line}\n"
                           f"Новый код: <code>{masked}</code>\n"
                           f"Осталось попыток: <b>{al}</b>\n"
-                          f"{lp_text}\nНабери 👇"),
+                          f"{lp_text}\nУгадай цифру 👇"),
                     parse_mode="HTML",
-                    reply_markup=_build_code_keyboard(rid, vid, revealed, new_code, ""))
+                    reply_markup=_build_code_keyboard(rid, vid, new_code, new_hidden_pos))
 
             except Exception as e:
                 await session.rollback()
                 _cleanup_session(iid, rid, vid)
-                logger.error(f"❌ submit: {e}", exc_info=True)
+                logger.error(f"❌ safe_guess: {e}", exc_info=True)
             finally:
                 await session.close()
 
@@ -2125,7 +2095,8 @@ async def safe_use_lockpick(call: CallbackQuery) -> None:
                 sess["lockpicks_available"] = lockpick_count
 
                 code = sess["code"]
-                revealed = set(sess.get("revealed", []))
+                hidden_pos = sess.get("hidden_pos", 0)
+                revealed = {i for i in range(len(code)) if i != hidden_pos}
                 masked = _mask_code(code, revealed)
 
                 vr = await session.execute(select(User).where(User.tg_id == vid).with_for_update())
@@ -2145,9 +2116,9 @@ async def safe_use_lockpick(call: CallbackQuery) -> None:
                           f"{health_line}"
                           f"Код: <code>{masked}</code>\n"
                           f"Попыток: <b>1</b>\n"
-                          f"{lp_text}\nНабери 👇"),
+                          f"{lp_text}\nУгадай цифру 👇"),
                     parse_mode="HTML",
-                    reply_markup=_build_code_keyboard(rid, vid, revealed, code, ""))
+                    reply_markup=_build_code_keyboard(rid, vid, code, hidden_pos))
 
             except Exception as e:
                 await session.rollback()
